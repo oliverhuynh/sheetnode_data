@@ -192,6 +192,43 @@ function sheetnode_data_form_validate($form, &$form_state) {
     }
   }
 }
+
+// Fix the date field, TODO: Fix directly in sheetnode
+function cell_handle_pre(&$cell, $datefields) {
+  if (isset($cell['formula']) && $cell['datatype'] == 'c') {
+    if ($cell['formula']) {
+      $t = strtotime($cell['formula']);
+      if ($t) {
+        $cell['datavalue'] = sd_add_cur_time($t);
+        $cell['isDate'] = TRUE;
+      }
+      else {
+        $cell['datavalue'] = NULL;
+      }
+    }
+    else {
+      $cell['datavalue'] = NULL;
+    }
+  }
+  else {
+    if (in_array($cell['pos'][0], $datefields)) {
+      if ($cell['datavalue']) {
+        $t = strtotime($cell['datavalue']);
+        if ($t) {
+          $cell['datavalue'] = sd_add_cur_time($t);
+          $cell['isDate'] = TRUE;
+        }
+        else {
+          $cell['datavalue'] = NULL;
+        }
+      }
+      else {
+        $cell['datavalue'] = NULL;
+      }
+    }
+  }
+}
+
 /*
  * submit function to save sheetnode data
  */
@@ -231,17 +268,6 @@ function sheetnode_data_form_submit($form, &$form_state) {
       }
     }
   }
-  // Fix the date field, TODO: Fix directly in sheetnode
-  foreach ($annotations['sheet']['cells'] as &$cell) {
-    if (isset($cell['formula']) && $cell['datatype'] == 'c' && strtotime($cell['formula'])) {
-      $cell['datavalue'] = !empty($cell['formula']) ? sd_add_cur_time(strtotime($cell['formula'])) : NULL;
-    }
-    else {
-      if (in_array($cell['pos'][0], $datefields) && strtotime($cell['datavalue'])) {
-        $cell['datavalue'] = !empty($cell['datavalue']) ? sd_add_cur_time(strtotime($cell['datavalue'])) : NULL;
-      }
-    }
-  }
   $colRange = sheetnode_data_columns_range($annotations['sheet']['attribs']['lastcol']);
   $field_names_map = array_combine($colRange, $field_names);
   $submitedData = array();
@@ -254,6 +280,7 @@ function sheetnode_data_form_submit($form, &$form_state) {
     $row = new stdClass();
     $update = FALSE;
     foreach ($colRange as $col) {
+      cell_handle_pre($annotations['sheet']['cells'][$col.$i], $datefields);
       if (!empty($annotations['sheet']['cells'][$col.$i])) {
         $val = empty($annotations['sheet']['cells'][$col.$i]['datavalue'])?'':$annotations['sheet']['cells'][$col.$i]['datavalue'];
         $row->{$field_names_map[$col]} = (trim($val) == '')?NULL:$val;
@@ -269,13 +296,20 @@ function sheetnode_data_form_submit($form, &$form_state) {
     if (!empty($original_id_map[$i - 2])) {
       //test row data updated or not. Because $olddata and $row have difference key we must traversal all value to compare
       $olddata = $views->result[$i - 2];
+      $colI = -1;
       foreach ($row as $k => $v) {
+        // Find the cell
+        $colI++;
+        $col = $colRange[$colI];
+        $cell = $annotations['sheet']['cells'][$col.$i];
         if ($olddata->{$views->base_table . '_' . $k} != $v) {
-          if (is_numeric($v) && isTimestamp($v)) {
-            // Oliver: Auto add datetime or leave the same old date
-            if (date("Y-m-d", $olddata->{$views->base_table . '_' . $k}) == date("Y-m-d", $v)) {
-              $update = FALSE;
-              continue ;
+          if (isset($cell['isDate']) && $cell['isDate']) {
+            if (is_numeric($v) && isTimestamp($v)) {
+              // Oliver: Auto add datetime or leave the same old date
+              if (date("Y-m-d", $olddata->{$views->base_table . '_' . $k}) == date("Y-m-d", $v)) {
+                $update = FALSE;
+                continue ;
+              }
             }
           }
           $update = TRUE;
