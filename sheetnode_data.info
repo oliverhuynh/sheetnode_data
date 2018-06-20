@@ -1,0 +1,5 @@
+name = "sheetnode data"
+description = "This module is a bridge between sheetnode and data module"
+core = 7.x
+dependencies[] = sheetnode
+dependencies[] = data

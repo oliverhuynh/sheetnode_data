@@ -1,0 +1,68 @@
+<?php /* -*- mode: php; indent-tabs-mode: nil; tab-width: 2; -*- */
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function sheetnode_data_uninstall() {
+  variable_del('sheetnode_data_clear');
+  variable_del('sheetnode_data_unload_js');
+  variable_del('sheetnode_data_unload_js_message');
+  variable_del('sheetnode_data_unload_js_message_enable');  
+  variable_del('sheetnode_data_admin_cancelbutton');
+  variable_del('sheetnode_data_admin_verbose');
+}
+
+/*
+ * Implementaion of hook_schema().
+ */
+function sheetnode_data_schema() {
+  $schema['sheetnode_views_data_lock'] = array(
+    'description' => 'content lock module table.',
+    'fields' => array(
+      'views_name' => array(
+        'description' => 'The views name.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'uid' => array(
+        'description' => 'User that holds the lock.',
+        'type' => 'int',
+        'size' => 'normal',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'timestamp' => array(
+        'description' => 'Time the lock occured.',
+        'size' => 'normal',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'ajax_key' => array(
+        'description' => 'A key which AJAX requests must prevent to prevent page reloads from breaking.',
+        'size' => 'normal',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'session' => array(
+        'description' => 'User session.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+    ),
+    'indexes' => array(
+      'user' => array('uid'),
+    ),
+    'primary key' => array('views_name'),
+  );
+  return $schema;
+}
+

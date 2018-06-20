@@ -1,0 +1,550 @@
+<?php
+module_load_include('inc', 'sheetnode_data', 'sheetnode_data.sheetviews');
+include 'sheetnode_data.inc';
+include 'sheetnode_data.lock.inc';
+
+/**
+ * Implementation of hook_permission().
+ */
+function sheetnode_data_permission() {
+  return array(
+    'check out sheetviews' => array(
+      'title' => t('Check Out/Lock Sheetviews'),
+      'description' => t('Enables users to lock sheetviews and requires them to respect locks others have made.'),
+     ),
+    'administer checked out sheetviews' => array(
+      'title' => t('Administer Checked Out Sheetviews'),
+      'description' => t('Enables administrators to view and break locks made by other users.'),
+      'restrict access' => TRUE,
+     ),
+   );
+}
+
+/**
+ * Implementation of hook_help().
+ */
+function sheetnode_data_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#sheetviews_lock':
+      $output = '<p>'. t("Drupal's default sheetviews locking strategy is optimistic, that is, two users may start to edit the same sheetviews and the one who is hitting the save button first wins the race, while the other is displayed a message stating <em>this sheetviews has been modified by another user, changes cannot be saved</em>.  Depending on the number of editors in your organization this might not be an acceptable solution.") .'</p>';
+      $output .= '<p>'. t('The sheetviews locking module implements pessimistic locking, which means that sheetviews will be exclusively locked whenever a user starts editing it.  The lock will be automatically released when the user submits the form or navigates away from the edit page.') .'</p>';
+      $output .= '<p>'. t('Users may also permanently lock sheetviews, to prevent others from editing it.  Sheetviews locks that have been "forgotten" can be automatically released after a configurable time span.') .'</p>';
+      return $output;
+
+    case 'admin/config/content/sheetnode/sheetviews_lock_overview':
+      return '<p>'. t('Below is a list of all locked sheetviews. Click on <em>!checkin</em> to release a lock.', array('!checkin' => t('release lock'))) .'</p>';
+
+    case 'user/%/sheetviews_lock':
+      return '<p>'. t('Below is a list of all sheetviews locked by you. Click on <em>!checkin</em> to release a lock.', array('!checkin' => t('release lock'))) .'</p>';
+  }
+}
+
+
+/**
+ * Implements hook_menu().
+ */
+function sheetnode_data_menu() {
+  $items = array();
+
+  $items['admin/config/content/sheetnode/sheetnode-data'] = array(
+    'title' => 'Sheetnode data',
+    'description' => 'sheetnode data configs',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('sheetnode_data_settings_form'),
+    'type' => MENU_LOCAL_TASK,
+    'access callback' => 'user_access',
+    'access arguments' => array('administer site configuration'),
+    'file' => 'sheetnode_data.admin.inc'
+  );
+
+  $items['admin/config/content/sheetnode/sheetviews_lock_overview'] = array(
+    'title' => 'Locked sheetviews',
+    'page callback' => 'sheetnode_data_views_lock_overview',
+    'access callback' => 'user_access',
+    'access arguments' => array('administer checked out sheetviews'),
+    'weight' => 5,
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['admin/config/content/sheetnode/sheetviews_lock/release'] = array(
+    'page callback' => 'sheetnode_data_views_lock_release_item',
+    'page arguments' => array(6, NULL),
+    'access arguments' => array('administer checked out sheetviews'),
+    'type' => MENU_CALLBACK,
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['admin/config/content/sheetnode/%/sheetviews_lock/releaseown'] = array(
+    'page callback' => 'sheetnode_data_views_lock_release_own_item',
+    'page arguments' => array(4, TRUE),
+    'access arguments' => array('check out sheetviews'),
+    'type' => MENU_CALLBACK,
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['user/%user/sheetviews_lock'] = array(
+    'title' => 'Locked sheetviews',
+    'page callback' => 'sheetnode_data_views_lock_overview',
+    'page arguments' => array(1),
+    'access callback' => 'user_access',
+    'access arguments' => array('check out sheetviews'),
+    'weight' => 5,
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['ajax/sheetviews_lock/%/canceledit'] = array (
+    'page callback' => 'sheetnode_data_views_lock_release_own_item',
+    'page arguments' => array(2, FALSE),
+    'access callback' => true,
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['ajax/sheetviews_lock/%/lock'] = array (
+    'page callback' => 'sheetnode_data_ajax_lock_callback',
+    'page arguments' => array(2),
+    'access callback' => 'user_access',
+    'access arguments' => array('check out sheetviews'),
+    'file' => 'sheetnode_data.sheetviews.inc',
+  );
+  $items['admin/config/content/sheetnode/sheetviews_lock'] = array (
+    'type' => MENU_LOCAL_TASK,
+    'title' => 'sheetnode views lock',
+    'description' => 'Configuration options for the Sheetnode views lock module',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('sheetnode_data_views_lock_admin_settings'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'sheetnode_data.admin.inc'
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function sheetnode_data_form_alter(&$form, &$form_state, $form_id) {
+  $views_list = variable_get('sheetnode_data_views');
+  if (!empty($form['sheetview'])) {
+    if(in_array($form_state['build_info']['args'][0]->name, $views_list)) {
+      if (!empty($form_state['build_info']['args'][0]->field)) {
+        $views = $form_state['build_info']['args'][0];
+        $table = data_get_table($views->base_table);
+        if (empty($views->field[$table->table_schema['primary key'][0]])) {
+          drupal_set_message(t('We could not find datatable GUID in views field. Please add to GUID field before save sheetnode data.'), 'error');
+          do_the_lock($form, $form_state);
+        }
+      }
+      //implement sheetviews lock
+      init_sheetview_lock($form, $form_state, $form_id);
+      $view = $form_state['build_info']['args'][0];
+      $form['view'] = array('#type' => 'value', '#value' => $view);
+      $form['#validate'][] = 'sheetnode_data_form_validate';
+      $form['#submit'] = array('sheetnode_data_form_submit');
+      //disable submit button to prevent data lost. It will be enabled in js
+      $form['actions']['submit']['#attributes']['disabled'][] = 'disabled';
+      $m = drupal_get_path('module','sheetnode_data');
+      drupal_add_js("$m/js/sheetviews_button_lock.js");
+    }
+  }
+  //Handle views exposed form change jobnumber
+  if ($form['#form_id'] == 'views_exposed_form' && in_array($form_state['view']->name, $views_list)) {
+    if (!empty($_GET['jobnumber'])) {
+      $form['previous_jobnumber'] = array('#type' => 'hidden', '#value' => $_GET['jobnumber']);
+    }
+    array_unshift($form['#submit'],'sheetnode_data_exposed_form_submit');
+  }
+}
+
+function isTimestamp($timestamp) {
+  if (ctype_digit($timestamp) && strtotime(date('Y-m-d H:i:s',$timestamp)) === (int)$timestamp) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+function sd_add_cur_time($datetimestamp) {
+  $datetime = date("Y-m-d", $datetimestamp);
+  $t = time() - strtotime("today");
+  $t1 = strtotime($datetime) + $t;
+  return $t1;
+}
+
+/*
+ * validate function to save sheetnode data
+ */
+function sheetnode_data_form_validate($form, &$form_state) {
+  global $user;
+  //empty other form validate error
+  $error = &drupal_static('form_set_error', array());
+  $error = array();
+  $views = $form_state['values']['view'];
+  if (isset($views->name) && _sheetnode_data_is_lockable_views($views) && user_access('check out sheetviews')) {
+    // Existing viewsname. Check if we still own the lock.
+    if ($lock = sheetnode_data_views_lock_fetch_lock(sheetnode_data_get_lockname($views->name))) {
+      if ($lock->uid != $user->uid) {
+        // Lock is no longer ours.
+        form_set_error('changed', t('Your lock has been removed!') .'<br />'. sheetnode_data_views_data_lock_owner($lock) .'<br />'. t('You can still save the content if this user aborts the edit operation without saving changes.'));
+      }
+    }
+    else {
+      // Views is not locked. Try to lock
+      if (!sheetnode_data_lock_views(sheetnode_data_get_lockname($views->name), $user->uid, $user->sid)) {
+        form_set_error('failed',t('Failed to lock this sheet.'), 'Error');
+      }
+    }
+  }
+}
+/*
+ * submit function to save sheetnode data
+ */
+function sheetnode_data_form_submit($form, &$form_state) {
+  $views = $form_state['values']['view'];
+  // TODO: Find item that has been changed
+  /*dsm($form_state['values']['annotations']);
+  preg_match_all("/^set\s.*\sempty/im", $form_state['values']['annotations'], $matches);
+  dsm($matches);*/
+  $annotations = socialcalc_parse($form_state['values']['annotations']);
+  //$views = $form_state['build_info']['args'][0];
+  $table = data_get_table($views->base_table);
+  $conf = _sheetnode_display_get_custom_sort_config();
+  $sort_fields = $conf[$views->base_table];
+  // Get field name base on displayed view
+  $field_names = array();
+  $id = 0;
+  $datefields = array();
+  $display = $views->current_display;
+  //store original row guid map
+  $original_id_map = array();
+  if (!empty($views->result)) {
+    foreach ($views->result as $k => $v) {
+      $original_id_map[$k] = $v->{$table->table_schema['primary key'][0]};
+    }
+  }
+  if (empty($views->display[$display]->display_options['fields'])) {
+    //get default fields if current display fields empty
+    $display = 'default';
+  }
+  foreach($views->display[$display]->display_options['fields'] as $field_name => $val ) {
+    if ($val['exclude'] == 0) {
+      $id++;
+      $field_names[$id] = $field_name;
+      if (isset($val['custom_date_format'])) {
+        $datefields[] = $id;
+      }
+    }
+  }
+  // Fix the date field, TODO: Fix directly in sheetnode
+  foreach ($annotations['sheet']['cells'] as &$cell) {
+    if (isset($cell['formula']) && $cell['datatype'] == 'c' && strtotime($cell['formula'])) {
+      $cell['datavalue'] = !empty($cell['formula']) ? sd_add_cur_time(strtotime($cell['formula'])) : NULL;
+    }
+    else {
+      if (in_array($cell['pos'][0], $datefields) && strtotime($cell['datavalue'])) {
+        $cell['datavalue'] = !empty($cell['datavalue']) ? sd_add_cur_time(strtotime($cell['datavalue'])) : NULL;
+      }
+    }
+  }
+  $colRange = sheetnode_data_columns_range($annotations['sheet']['attribs']['lastcol']);
+  $field_names_map = array_combine($colRange, $field_names);
+  $submitedData = array();
+  // Build submited data structure. Loop from row 2 because row 1 contain heading
+  // Compare to update or insert row
+  $updated = array();
+  $inserted = array();
+  $autoupdate_config = _sheetnode_data_get_autoupdate_config($views->name);
+  for ($i = 2; $i<= $annotations['sheet']['attribs']['lastrow']; $i++) {
+    $row = new stdClass();
+    $update = FALSE;
+    foreach ($colRange as $col) {
+      if (!empty($annotations['sheet']['cells'][$col.$i])) {
+        $val = empty($annotations['sheet']['cells'][$col.$i]['datavalue'])?'':$annotations['sheet']['cells'][$col.$i]['datavalue'];
+        $row->{$field_names_map[$col]} = (trim($val) == '')?NULL:$val;
+        //all sort field value should be in uppercase
+        if ($row->{$field_names_map[$col]} != NULL && variable_get('sheetviews_data_uppercase', TRUE)) {
+          $row->{$field_names_map[$col]} = strtoupper($row->{$field_names_map[$col]});
+        }
+      } else {
+        $row->{$field_names_map[$col]} = NULL;
+      }
+    }
+    //Check if this row is updated => $updated
+    if (!empty($original_id_map[$i - 2])) {
+      //test row data updated or not. Because $olddata and $row have difference key we must traversal all value to compare
+      $olddata = $views->result[$i - 2];
+      foreach ($row as $k => $v) {
+        if ($olddata->{$views->base_table . '_' . $k} != $v) {
+          if (is_numeric($v) && isTimestamp($v)) {
+            // Oliver: Auto add datetime or leave the same old date
+            if (date("Y-m-d", $olddata->{$views->base_table . '_' . $k}) == date("Y-m-d", $v)) {
+              $update = FALSE;
+              continue ;
+            }
+          }
+          $update = TRUE;
+          break;
+        }
+      }
+
+      if ($update) {
+        //set guid to update correct position on datatable
+        $row->{$table->table_schema['primary key'][0]} = $original_id_map[$i - 2];
+        //find and set nid
+        foreach ($autoupdate_config as $conf) {
+          $nids = sheetnode_data_searhnid($conf[0],array($conf[2] => $row->$conf[1]));
+          $row->$conf[3] = $nids[0]; //assume that only one result returned
+        }
+        $row->rowweight = psc_row_weight_score_calc($row,$sort_fields);
+        $updated[] = $row;
+      }
+
+    } else {
+      // Check if this row is inserted => $inserted
+      //find and set nid
+      foreach ($autoupdate_config as $conf) {
+        $nids = sheetnode_data_searhnid($conf[0],array($conf[2] => $row->$conf[1]));
+        $row->$conf[3] = $nids[0]; //assume that only one result returned
+      }
+      $row->rowweight = psc_row_weight_score_calc($row,$sort_fields);
+      $inserted[] = $row;
+    }
+
+    $submitedData[] =  $row;
+  }
+  //actually write to database
+  $table_fields = array_keys($table->table_schema['fields']);
+  if (!empty($updated)) {
+    //update to database
+    foreach($updated as $u) {
+      //-----------DEBUGGING----------
+      // watchdog('DEBUG', __FUNCTION__ . print_r(array('db_update', $table->table_schema['primary key'][0]), TRUE));
+      //-----------END DEBUGGING----------
+      $table->handler()->update($u, $table->table_schema['primary key'][0]);
+    }
+  }
+  if (!empty($inserted)) {
+    //insert row
+    foreach($inserted as $v) {
+      //-----------DEBUGGING----------
+      // watchdog('DEBUG', __FUNCTION__ . print_r(array('db_insert', $v), TRUE));
+      //-----------END DEBUGGING----------
+      $table->handler()->insert($v);
+    }
+  }
+
+  //remove rows nolonger use
+  //$views_old_result = $views->result;
+  $del_count = count($submitedData) - count($views->result);
+  if (abs($del_count) == count($views->result)) {
+    drupal_set_message(t("The system has found strange data in your action. To prevent data loss, this action has been denied. You may press Back to be back to your previous data and try again."), 'warning');
+    $del_count = 0;
+  }
+  elseif ($del_count < 0) {
+    $del = array_slice($views->result, $del_count);
+    foreach ($del as $d) {
+      //-----------DEBUGGING----------
+      //watchdog('DEBUG', __FUNCTION__ . print_r(array('db_delete', $d->{$table->table_schema['primary key'][0]}), TRUE));
+      //-----------END DEBUGGING----------
+      db_delete($table->name)->condition($table->table_schema['primary key'][0], $d->{$table->table_schema['primary key'][0]}, '=')->execute();
+    }
+  }
+  drupal_set_message(t("The sheet has been saved on @time. @count_updated updated rows, @count_inserted new rows, @count_deleted deleted rows.", array('@count_updated' => count($updated), '@count_inserted' => count($inserted), '@count_deleted' => ($del_count <= 0)?abs($del_count):0, '@time' => format_date(time(), 'small'))));
+  //release sheetview lock
+  sheetnode_data_views_lock_release(sheetnode_data_get_lockname($views->name));
+}
+
+/*
+*  helper function to find nid base on fields conditions
+*  return nids
+*/
+function sheetnode_data_searhnid($node_type, $fields_condition) {
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node')
+        ->entityCondition('bundle', $node_type);
+  foreach ($fields_condition as $name => $val) {
+
+    $query->fieldCondition($name, 'value', $val, '=');
+  }
+  $result = $query->execute();
+  return empty($result['node'])?0:array_keys($result['node']);
+}
+/**
+ * Implements hook_views_query_alter(&$view, &$query).
+ */
+function sheetnode_data_views_query_alter(&$view, &$query) {
+  if ($view->style_plugin->plugin_name == 'sheet') {
+    $views_list = variable_get('sheetnode_data_views');
+    if(in_array($view->name, $views_list)) {
+      $key = array_search(' node_access', $query->tags);
+      unset($query->tags[$key]);
+    }
+  }
+  //find filter field which have 'contain any word' or 'is null' condition
+  $exposed_filters = array();
+  $gets = array_keys($view->exposed_raw_input);
+  $i = 0;
+  foreach ($view->exposed_raw_input as $field_name => $value) {
+    if (strstr($field_name, '_op')) {
+      $field_name = str_replace('_op', '', $field_name);
+      if ($value == 'word' ) {
+        $exposed_filters['word'][$field_name] = $view->exposed_raw_input[$gets[$i+1]];
+      }
+      if ($value == 'empty') {
+        $exposed_filters['is_null'][$field_name] = $view->exposed_raw_input[$gets[$i+1]];
+      }
+    }
+    $i++;
+  }
+  foreach ($query->where as &$where) {
+    foreach ($where['conditions'] as &$condition) {
+      if (is_object($condition['field']) && get_class($condition['field']) == 'DatabaseCondition') {
+        $DatabaseCondition = & $condition['field'];
+        $conditions = & $DatabaseCondition->conditions();
+        //apply modification if match
+        if (!empty($exposed_filters['word'])) {
+          foreach ($exposed_filters['word'] as $key => $values) {
+            $field = explode('.', $conditions[0]['field']);
+            $field = array_pop($field);
+            if ($key == $field) {
+              //matched, repalacce conditions with new value
+              $cond = $conditions[0];
+              $conditions = array('#conjunction' => $conditions['#conjunction']);
+              $values = check_plain($values);
+              $values = explode(' ', $values);
+              $values = array_map('trim', $values);
+              array_unique($values);
+              foreach ($values as $v) {
+                $cond['value'] = '% ' . $v . ' %';
+                $conditions[] = $cond;
+                $cond['value'] = $v . ' %';
+                $conditions[] = $cond;
+                $cond['value'] = '% ' . $v;
+                $conditions[] = $cond;
+                $cond['value'] = $v;
+                $conditions[] = $cond;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!empty($exposed_filters['is_null'])) {
+    foreach ($exposed_filters['is_null'] as $key => $values) {
+      $table = '';
+      foreach ($query->field_aliases as $table_name => $field_names) {
+        if (array_key_exists($key, $field_names)) {
+          $table = $table_name;
+          break;
+        }
+      }
+      if ($table == '') {
+        continue;
+      }
+
+      $query->where[1]['conditions'][] = array(
+        'field' => implode('.', array($table,$key)),
+        'value' => NULL,
+        'operator' => 'IS NULL',
+      );
+    }
+  }
+}
+/*
+*  Allow display raw data for sheetnode views
+*/
+function sheetnode_data_preprocess_views_view_field(&$vars) {
+  $views_list = variable_get('sheetnode_data_views');
+  if(in_array($vars['view']->name, $views_list)) {
+    $vars['output'] = decode_entities($vars['output']);
+  }
+}
+
+
+
+/**
+ * Callback for a cancel request on a form
+ */
+function sheetnode_data_views_lock_cancel_submit(&$form, &$form_state) {
+  // Release the views
+  sheetnode_data_views_lock_release_own_item(sheetnode_data_get_lockname($form_state['build_info']['args'][0]->name), TRUE);
+}
+
+
+/**
+ * Implement hook_user_logout().
+ */
+function sheetnode_data_user_logout($account) {
+  // removing all locks, as the user logs out
+  _sheetviews_lock_release_all_user_locks($account->uid);
+}
+
+/**
+ * Implement our own hook_sheetviews_lock_views_lockable().
+ */
+function sheetnode_data_lock_views_lockable($views) {
+  $lockable = drupal_static(__FUNCTION__);
+  // Check for a cache hit
+  if (isset($lockable[$views->name])) {
+    return $lockable[$views->name];
+  }
+  $lockable_views = variable_get('sheetnode_data_views_lockable', array());
+  if(in_array($views->name, $lockable_views)) {
+    $lockable[$views->name] = TRUE;
+  } else {
+    $lockable[$views->name] = FALSE;
+  }
+
+  return $lockable[$views->name];
+}
+function _sheetnode_data_get_autoupdate_config($views_name) {
+  $config = drupal_static(__FUNCTION__);
+  if (!isset($config[$views_name])) {
+    $raw = variable_get('sheetnode_data_auto_update_' . $views_name, '');
+    $config[$views_name] = array();
+    if (!empty($raw)) {
+      $raw = explode(PHP_EOL, $raw);
+      foreach($raw as $c) {
+        $config[$views_name][] = explode('|', $c);
+      }
+    }
+  }
+  return $config[$views_name];
+}
+/*
+ * submit callback to release previous sheetviews lock
+ */
+function sheetnode_data_exposed_form_submit($form, &$form_state) {
+  if(!empty($form_state['input']['previous_jobnumber']) && $form_state['input']['previous_jobnumber'] != $_GET['jobnumber']) {
+    $lockname = $form_state['view']->name.'_'.$form_state['input']['previous_jobnumber'];
+    $lock = sheetnode_data_views_lock_fetch_lock($lockname);
+    global $user;
+    //only release if user own the lock in same session id
+    if (!empty($lock) && $lock->uid == $user->uid && $lock->session == $user->sid) {
+      sheetnode_data_views_lock_release($form_state['view']->name.'_'.$form_state['input']['previous_jobnumber']);
+    }
+  }
+}
+/*
+ * build array of column range
+ * $num destination column number to create. Ex: A =1, B =2 ...
+ */
+function sheetnode_data_columns_range($num) {
+  $range = array();
+  for ($i = 1; $i <= $num; $i++) {
+    $range[] = sheetnode_data_getNameFromNumber($i);
+  }
+  return $range;
+}
+/*
+ * get column name using colum number
+ * $num column number. Ex: A =1, B =2 ...
+ */
+function sheetnode_data_getNameFromNumber($num) {
+    $numeric = ($num - 1) % 26;
+    $letter = chr(65 + $numeric);
+    $num2 = intval(($num - 1) / 26);
+    if ($num2 > 0) {
+        return sheetnode_data_getNameFromNumber($num2) . $letter;
+    } else {
+        return $letter;
+    }
+}
